@@ -14,7 +14,7 @@
  */
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { useNavigate, useLocation } from 'react-router-dom';
+import { useNavigate, useLocation, Link } from 'react-router-dom';
 import { useForm, Controller } from 'react-hook-form';
 import { motion, AnimatePresence } from 'framer-motion';
 import { toast } from 'react-toastify';
@@ -28,9 +28,11 @@ import {
   HiDocumentText,
   HiCog6Tooth,
   HiPhoto,
+  HiMicrophone,
 } from 'react-icons/hi2';
 
 import { useCreateComplaint, useUploadImages } from '../../hooks/useComplaints';
+import { useSpeechToText } from '../../hooks/useSpeechToText';
 import { requiredRule } from '../../utils/validators';
 import { departments } from '../../utils/helpers';
 import locationService from '../../services/locationService';
@@ -90,10 +92,54 @@ export default function CreateComplaint() {
   const [previews, setPreviews]     = useState([]);   // data-url strings
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef(null);
+  const isAutoFilling = useRef(false);
 
   /* watched values */
   const selectedState = watch('state');
   const isAnonymous   = watch('is_anonymous');
+  const selectedCategory   = watch('category');
+  const selectedDepartment = watch('department');
+  const selectedDistrict   = watch('district');
+  const watchLatitude      = watch('latitude');
+  const watchLongitude     = watch('longitude');
+
+  /* ── Speech to Text Dictation ── */
+  const getSpeechLanguage = () => {
+    const match = document.cookie.match(/googtrans=\/en\/([a-z]{2})/i);
+    const code = match ? match[1] : (localStorage.getItem('preferred_lang') || 'en');
+    if (code === 'hi') return 'hi-IN';
+    if (code === 'or') return 'or-IN';
+    if (code === 'bn') return 'bn-IN';
+    if (code === 'te') return 'te-IN';
+    if (code === 'ta') return 'ta-IN';
+    if (code === 'mr') return 'mr-IN';
+    if (code === 'gu') return 'gu-IN';
+    if (code === 'pa') return 'pa-IN';
+    if (code === 'kn') return 'kn-IN';
+    if (code === 'ml') return 'ml-IN';
+    if (code === 'ur') return 'ur-IN';
+    return 'en-IN';
+  };
+
+  const { isListening, startListening, stopListening, isSupported } = useSpeechToText({
+    lang: getSpeechLanguage(),
+    onResult: (text) => {
+      setValue('description', text);
+    },
+  });
+
+  const toggleSpeechToText = () => {
+    if (!isSupported) {
+      toast.warning('Web Speech API is not supported in your browser.');
+      return;
+    }
+    if (isListening) {
+      stopListening();
+    } else {
+      startListening();
+      toast.info('Listening... Speak your complaint clearly.');
+    }
+  };
 
   /* ── dynamic locations state ── */
   const [dbStates, setDbStates] = useState([]);
@@ -101,6 +147,8 @@ export default function CreateComplaint() {
   const [loadingLocations, setLoadingLocations] = useState(false);
   const [dbCategories, setDbCategories] = useState([]);
   const [dbDepartments, setDbDepartments] = useState([]);
+  const [duplicateWarning, setDuplicateWarning] = useState(null);
+  const [checkingDuplicates, setCheckingDuplicates] = useState(false);
 
   useEffect(() => {
     const fetchStates = async () => {
@@ -158,10 +206,32 @@ export default function CreateComplaint() {
     }
   }, [dbStates, setValue]);
 
+  const findFuzzyMatch = (items, targetStr) => {
+    if (!targetStr || !items || items.length === 0) return null;
+    const targetLower = targetStr.toLowerCase().trim();
+    const cleanTarget = targetLower.replace(/state|district|dept/gi, '').trim();
+
+    // 1. Exact or ID match
+    let matched = items.find(
+      (item) => item.id.toString() === targetStr.toString() || item.name.toLowerCase() === targetLower || item.name.toLowerCase() === cleanTarget
+    );
+    if (matched) return matched;
+
+    // 2. Substring match
+    matched = items.find((item) => {
+      const itemName = item.name.toLowerCase();
+      return itemName.includes(cleanTarget) || cleanTarget.includes(itemName) || itemName.includes(targetLower) || targetLower.includes(itemName);
+    });
+    return matched || null;
+  };
+
   useEffect(() => {
-    setValue('district', ''); // Clear stale district selection when state changes
+    if (isAutoFilling.current) {
+      return;
+    }
     if (!selectedState) {
       setDbDistricts([]);
+      setValue('district', '');
       return;
     }
     const fetchDistricts = async () => {
@@ -178,9 +248,47 @@ export default function CreateComplaint() {
     fetchDistricts();
   }, [selectedState, setValue]);
 
+  /* ── fuzzy duplicate grievance checker ── */
+  useEffect(() => {
+    if (selectedCategory && selectedDepartment && selectedState && selectedDistrict) {
+      const runDuplicateCheck = async () => {
+        setCheckingDuplicates(true);
+        try {
+          const res = await complaintService.checkDuplicateComplaint({
+            category: selectedCategory,
+            department: selectedDepartment,
+            state: selectedState,
+            district: selectedDistrict,
+            latitude: watchLatitude || null,
+            longitude: watchLongitude || null,
+          });
+          if (res.duplicate_found) {
+            setDuplicateWarning(res.duplicates);
+          } else {
+            setDuplicateWarning(null);
+          }
+        } catch (err) {
+          console.error("Duplicate check failed:", err);
+          setDuplicateWarning(null);
+        } finally {
+          setCheckingDuplicates(false);
+        }
+      };
+
+      const debounceTimer = setTimeout(() => {
+        runDuplicateCheck();
+      }, 600); // 600ms debounce to prevent API spamming
+
+      return () => clearTimeout(debounceTimer);
+    } else {
+      setDuplicateWarning(null);
+    }
+  }, [selectedCategory, selectedDepartment, selectedState, selectedDistrict, watchLatitude, watchLongitude]);
+
   /* ── auto-fill from router state (AI hand-off) ── */
   useEffect(() => {
     if (location.state) {
+      isAutoFilling.current = true;
       const { title, description, category, department, address, landmark, state, district } = location.state;
       if (title) setValue('title', title);
       if (description) setValue('description', description);
@@ -189,33 +297,42 @@ export default function CreateComplaint() {
       
       // Match Category by Name or Code from DB
       if (category && dbCategories.length > 0) {
-        const matched = dbCategories.find(c => c.name.toLowerCase() === category.toLowerCase() || c.id.toString() === category.toString());
+        const matched = findFuzzyMatch(dbCategories, category);
         if (matched) setValue('category', matched.id.toString());
       }
       
       // Match Department
       if (department && dbDepartments.length > 0) {
-        const matched = dbDepartments.find(d => d.name.toLowerCase() === department.toLowerCase() || d.id.toString() === department.toString());
+        const matched = findFuzzyMatch(dbDepartments, department);
         if (matched) setValue('department', matched.id.toString());
       }
 
       // Match State and load its districts
       if (state && dbStates.length > 0) {
-        const matchedState = dbStates.find(s => s.name.toLowerCase() === state.toLowerCase() || s.id.toString() === state.toString());
+        const matchedState = findFuzzyMatch(dbStates, state);
         if (matchedState) {
           setValue('state', matchedState.id.toString());
-          locationService.getDistricts(matchedState.id).then((districtsData) => {
-            setDbDistricts(districtsData);
-            if (district) {
-              const matchedDistrict = districtsData.find(
-                d => d.name.toLowerCase() === district.toLowerCase() || d.id.toString() === district.toString()
-              );
-              if (matchedDistrict) {
-                setValue('district', matchedDistrict.id.toString());
+          locationService.getDistricts(matchedState.id)
+            .then((districtsData) => {
+              setDbDistricts(districtsData);
+              if (district) {
+                const matchedDistrict = findFuzzyMatch(districtsData, district);
+                if (matchedDistrict) {
+                  setValue('district', matchedDistrict.id.toString());
+                }
               }
-            }
-          });
+            })
+            .catch((err) => console.error("Error setting districts:", err))
+            .finally(() => {
+              setTimeout(() => {
+                isAutoFilling.current = false;
+              }, 500);
+            });
+        } else {
+          isAutoFilling.current = false;
         }
+      } else {
+        isAutoFilling.current = false;
       }
     }
   }, [location.state, dbCategories, dbDepartments, dbStates, setValue]);
@@ -363,6 +480,47 @@ export default function CreateComplaint() {
       </motion.div>
 
       <form onSubmit={handleSubmit(onSubmit)} noValidate>
+        {/* Duplicate Warning Banner */}
+        {duplicateWarning && duplicateWarning.length > 0 && (
+          <motion.div
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="bg-amber-50 border-l-4 border-amber-500 p-4 rounded-r-xl mb-6 shadow-sm text-slate-850"
+          >
+            <p className="font-bold text-amber-900 flex items-center gap-1.5 text-sm mb-2">
+              ⚠️ Alert: Similar Grievances Found Nearby
+            </p>
+            <p className="text-xs sm:text-sm text-amber-800 leading-relaxed mb-3">
+              Other citizens have already reported similar issues in your district/location. 
+              To get it resolved faster, you can view the existing complaint and support/upvote it rather than filing a duplicate report.
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {duplicateWarning.map((dup) => (
+                <div key={dup.id} className="bg-white border border-amber-250 rounded-xl p-3.5 flex flex-col justify-between shadow-2xs">
+                  <div>
+                    <span className="text-xs font-mono font-bold text-amber-700">
+                      {dup.reference_number || `#GOV-${dup.id}`}
+                    </span>
+                    <h4 className="font-semibold text-slate-900 text-xs sm:text-sm mt-1 mb-1.5 line-clamp-1">
+                      {dup.title}
+                    </h4>
+                    <p className="text-xs text-slate-500 line-clamp-2 mb-3">
+                      {dup.description}
+                    </p>
+                  </div>
+                  <Link
+                    to={`/complaints/${dup.id}`}
+                    target="_blank"
+                    className="btn bg-amber-600 hover:bg-amber-700 text-white text-xs py-1.5 px-3 rounded-lg font-bold w-full text-center decoration-none inline-block"
+                  >
+                    View & Support Grievance
+                  </Link>
+                </div>
+              ))}
+            </div>
+          </motion.div>
+        )}
+
         {/* ────────────────────────────────────────────────────────
            Section 1 — Basic Information
            ──────────────────────────────────────────────────────── */}
@@ -400,13 +558,28 @@ export default function CreateComplaint() {
               <label htmlFor="description" className="form-label mb-0">
                 Description <span className="text-danger">*</span>
               </label>
-              <button
-                type="button"
-                onClick={handleAIAssist}
-                className="inline-flex items-center gap-1.5 text-xs bg-gov-100 hover:bg-gov-200 text-gov-800 px-2.5 py-1 rounded-xl border border-gov-200 font-bold shadow-sm transition"
-              >
-                ✨ AI Assist
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={toggleSpeechToText}
+                  className={`inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-xl font-bold border transition cursor-pointer ${
+                    isListening
+                      ? 'bg-red-500 text-white border-red-600 animate-pulse shadow-md'
+                      : 'bg-amber-100 hover:bg-amber-200 text-amber-900 border-amber-300 shadow-2xs'
+                  }`}
+                  title={isListening ? 'Stop Voice Dictation' : 'Speak Complaint via Voice Dictation'}
+                >
+                  <HiMicrophone className={`w-3.5 h-3.5 ${isListening ? 'animate-bounce' : 'text-amber-700'}`} />
+                  <span>{isListening ? 'Listening...' : '🎤 Speak Complaint'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleAIAssist}
+                  className="inline-flex items-center gap-1.5 text-xs bg-gov-100 hover:bg-gov-200 text-gov-800 px-2.5 py-1 rounded-xl border border-gov-200 font-bold shadow-sm transition"
+                >
+                  ✨ AI Assist
+                </button>
+              </div>
             </div>
             <textarea
               id="description"

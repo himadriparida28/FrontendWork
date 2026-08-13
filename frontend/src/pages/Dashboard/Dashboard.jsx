@@ -649,16 +649,6 @@ export default function Dashboard() {
               ))}
             </div>
           </div>
-
-          <div className="mt-5 text-center pt-3 border-t border-slate-100">
-            <Link
-              to="/complaints"
-              className="inline-flex items-center gap-1.5 text-xs font-extrabold text-[#0052cc] hover:underline"
-            >
-              <span>View All Services</span>
-              <HiOutlineArrowRight className="h-3.5 w-3.5" />
-            </Link>
-          </div>
         </motion.div>
       </div>
 
